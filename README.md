@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 <div align="center">
   <img width="1200" height="475" alt="DataScribe AI Banner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
@@ -241,7 +240,3 @@ Error responses:
 - App Name: `DataScribe AI`
 - Description: `Voice to Structured Data Intelligence + AI-powered Form Fill automation`
 - Required browser permission: `microphone`
-=======
-# Datascribe-AI
-DataScribe AI is a voice- and text-driven platform that converts unstructured input into structured Table data, summaries, and auto-filled forms using AI-powered semantic mapping.
->>>>>>> origin/main

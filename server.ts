@@ -151,10 +151,10 @@ ${text}`;
   // ✅ Form analysis route (template understanding)
   app.post("/api/form/analyze", async (req, res) => {
     try {
-      const { fileName, mimeType, fileDataBase64 } = req.body || {};
+      const { fileName, mimeType, fileDataBase64, fileTextContent } = req.body || {};
 
-      if (!fileName || !fileDataBase64) {
-        return res.status(400).json({ error: "fileName and fileDataBase64 are required" });
+      if (!fileName || (!fileDataBase64 && !fileTextContent)) {
+        return res.status(400).json({ error: "fileName and either fileDataBase64 or fileTextContent are required" });
       }
 
       if (!apiKey) {
@@ -164,7 +164,7 @@ ${text}`;
       const resolvedMimeType = mimeType || mimeFromFileName(fileName);
 
       const prompt = `You are an expert form understanding AI.
-Analyze the uploaded form and produce a form-fill schema.
+Analyze the uploaded form and produce a form-fill schema that preserves the original field and table order as closely as possible.
 
 Return ONLY valid JSON in this exact shape:
 {
@@ -188,6 +188,16 @@ Return ONLY valid JSON in this exact shape:
       "description": "what this table captures"
     }
   ],
+  "layoutBlocks": [
+    {
+      "kind": "field",
+      "fieldKey": "field_key_from_fields"
+    },
+    {
+      "kind": "table",
+      "tableKey": "table_key_from_tableSections"
+    }
+  ],
   "instructions": ["special rules if any"]
 }
 
@@ -195,37 +205,50 @@ Rules:
 1) Detect field labels semantically.
 2) Include only fillable data fields.
 3) Keep keys stable and machine-friendly.
-4) If no tables, return tableSections as [].
-5) If uncertain, keep values conservative and still valid JSON.
-6) Do not include markdown or explanations outside JSON.`;
+4) Preserve the original top-to-bottom order in fields, tableSections, and layoutBlocks.
+5) layoutBlocks must reference only keys returned in fields/tableSections.
+6) If no tables, return tableSections as [].
+7) If uncertain, keep values conservative and still valid JSON.
+8) Do not include markdown or explanations outside JSON.`;
+
+      const usesExtractedText = typeof fileTextContent === "string" && fileTextContent.trim().length > 0;
+      const analysisPrompt = usesExtractedText
+        ? `${prompt}
+
+The original file could not be sent as a supported binary attachment, so the form content is provided below as extracted text. Infer the fillable structure from this text while preserving order as closely as possible.
+
+FILE_NAME:
+${String(fileName)}
+
+EXTRACTED_FORM_TEXT:
+${String(fileTextContent)}`
+        : prompt;
+
+      const buildAnalyzeContents = () => (
+        usesExtractedText
+          ? analysisPrompt
+          : [
+              { text: analysisPrompt },
+              {
+                inlineData: {
+                  mimeType: resolvedMimeType,
+                  data: fileDataBase64,
+                },
+              },
+            ]
+      );
 
       let result;
       try {
         result = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
-          contents: [
-            { text: prompt },
-            {
-              inlineData: {
-                mimeType: resolvedMimeType,
-                data: fileDataBase64,
-              },
-            },
-          ],
+          contents: buildAnalyzeContents(),
         });
       } catch (err) {
         console.warn("Primary model failed for /api/form/analyze. Falling back...");
         result = await ai.models.generateContent({
           model: "gemini-2.5-flash",
-          contents: [
-            { text: prompt },
-            {
-              inlineData: {
-                mimeType: resolvedMimeType,
-                data: fileDataBase64,
-              },
-            },
-          ],
+          contents: buildAnalyzeContents(),
         });
       }
 
@@ -253,7 +276,7 @@ Rules:
   // ✅ Form fill route (semantic value mapping)
   app.post("/api/form/fill", async (req, res) => {
     try {
-      const { formSchema, userInput } = req.body || {};
+      const { formSchema, userInput, focusFieldKey, focusFieldLabel, existingFilledFields } = req.body || {};
 
       if (!formSchema || !userInput) {
         return res.status(400).json({ error: "formSchema and userInput are required" });
@@ -264,10 +287,19 @@ Rules:
       }
 
       const prompt = `You are an expert AI form filler.
-Given a form schema and user narrative input, map values intelligently by meaning.
+Given a form schema and user narrative input, map values intelligently by meaning while preserving the form's original field and table structure.
 
 FORM_SCHEMA:
 ${JSON.stringify(formSchema, null, 2)}
+
+EXISTING_FILLED_FIELDS:
+${JSON.stringify(existingFilledFields || {}, null, 2)}
+
+CURRENT_FOCUS_FIELD_KEY:
+${focusFieldKey ? JSON.stringify(String(focusFieldKey)) : "null"}
+
+CURRENT_FOCUS_FIELD_LABEL:
+${focusFieldLabel ? JSON.stringify(String(focusFieldLabel)) : "null"}
 
 USER_INPUT:
 ${String(userInput)}
@@ -292,9 +324,11 @@ Return ONLY valid JSON in this exact shape:
 Rules:
 1) Use keys from schema fields and schema tableSections only.
 2) Preserve schema column order for each table.
-3) If a value is missing, set empty string.
-4) If no table data present, return filledTables as [].
-5) Do not include markdown or explanations outside JSON.`;
+3) If CURRENT_FOCUS_FIELD_KEY is present and the user gives a short answer, prioritize mapping that answer to that field.
+4) Never overwrite an already-filled value with a conflicting guess unless the new input clearly corrects it.
+5) If a value is missing, set empty string.
+6) If no table data present, return filledTables as [].
+7) Do not include markdown or explanations outside JSON.`;
 
       let result;
       try {

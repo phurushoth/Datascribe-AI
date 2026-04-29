@@ -47,12 +47,19 @@ interface FormTableSection {
   description: string;
 }
 
+interface FormLayoutBlock {
+  kind: 'field' | 'table';
+  fieldKey?: string;
+  tableKey?: string;
+}
+
 interface FormSchema {
   formTitle: string;
   formType: string;
   summary: string;
   fields: FormField[];
   tableSections: FormTableSection[];
+  layoutBlocks: FormLayoutBlock[];
   instructions: string[];
 }
 
@@ -286,6 +293,7 @@ const normalizeFormSchema = (raw: unknown): FormSchema => {
   const input = isRecord(raw) ? raw : {};
   const rawFields = Array.isArray(input.fields) ? input.fields : [];
   const rawTables = Array.isArray(input.tableSections) ? input.tableSections : [];
+  const rawLayoutBlocks = Array.isArray((input as any).layoutBlocks) ? (input as any).layoutBlocks : [];
   const rawInstructions = Array.isArray(input.instructions) ? input.instructions : [];
 
   const fields: FormField[] = rawFields.map((field, index) => {
@@ -315,12 +323,41 @@ const normalizeFormSchema = (raw: unknown): FormSchema => {
     };
   });
 
+  const fieldKeySet = new Set(fields.map((field) => field.key));
+  const tableKeySet = new Set(tableSections.map((table) => table.key));
+
+  let layoutBlocks: FormLayoutBlock[] = rawLayoutBlocks
+    .map((block) => {
+      const b = isRecord(block) ? block : {};
+      const kind = asSimpleString(b.kind).toLowerCase();
+      if (kind === 'field') {
+        const fieldKey = asSimpleString(b.fieldKey);
+        if (!fieldKeySet.has(fieldKey)) return null;
+        return { kind: 'field' as const, fieldKey };
+      }
+      if (kind === 'table') {
+        const tableKey = asSimpleString(b.tableKey);
+        if (!tableKeySet.has(tableKey)) return null;
+        return { kind: 'table' as const, tableKey };
+      }
+      return null;
+    })
+    .filter((block): block is FormLayoutBlock => Boolean(block));
+
+  if (layoutBlocks.length === 0) {
+    layoutBlocks = [
+      ...fields.map((field) => ({ kind: 'field' as const, fieldKey: field.key })),
+      ...tableSections.map((table) => ({ kind: 'table' as const, tableKey: table.key })),
+    ];
+  }
+
   return {
     formTitle: asSimpleString(input.formTitle) || 'Untitled Form',
     formType: asSimpleString(input.formType) || 'form',
     summary: asSimpleString(input.summary) || 'Form template analyzed and ready for AI-assisted filling.',
     fields,
     tableSections,
+    layoutBlocks,
     instructions: rawInstructions.map((i) => toCellText(i)).filter(Boolean),
   };
 };
@@ -379,6 +416,61 @@ const normalizeFormFillResult = (raw: unknown, schema: FormSchema): FormFillResu
   };
 };
 
+const mergeFormFillResults = (
+  current: FormFillResult | null,
+  incoming: FormFillResult,
+  schema: FormSchema
+): FormFillResult => {
+  const filledFields: Record<string, string> = {};
+  for (const field of schema.fields) {
+    const currentValue = current?.filledFields[field.key] || '';
+    const nextValue = incoming.filledFields[field.key] || '';
+    filledFields[field.key] = nextValue.trim() ? nextValue : currentValue;
+  }
+
+  const tableMap = new Map<string, FilledTableSection>();
+  for (const table of current?.filledTables || []) {
+    tableMap.set(table.key, table);
+  }
+  for (const table of incoming.filledTables) {
+    const hasRows = table.rows.some((row) => row.some((cell) => cell.trim()));
+    if (hasRows || !tableMap.has(table.key)) {
+      tableMap.set(table.key, table);
+    }
+  }
+
+  return {
+    filledFields,
+    filledTables: schema.tableSections.map((table) => {
+      return tableMap.get(table.key) || {
+        key: table.key,
+        title: table.title,
+        columns: table.columns,
+        rows: [],
+      };
+    }),
+    unmappedInfo: uniqueNonEmpty([...(current?.unmappedInfo || []), ...incoming.unmappedInfo]),
+    summary: incoming.summary || current?.summary || 'Form data mapped successfully.',
+  };
+};
+
+const buildEmptyFormFillResult = (schema: FormSchema): FormFillResult => ({
+  filledFields: Object.fromEntries(schema.fields.map((field) => [field.key, ''])),
+  filledTables: schema.tableSections.map((table) => ({
+    key: table.key,
+    title: table.title,
+    columns: table.columns,
+    rows: [],
+  })),
+  unmappedInfo: [],
+  summary: 'Ready to fill.',
+});
+
+const isBlankValue = (value: string): boolean => {
+  const normalized = value.trim().toLowerCase();
+  return !normalized || normalized === 'n/a';
+};
+
 const COLORS: Record<string, any> = {
   amber: { bg: 'rgba(245,158,11,0.15)', border: 'rgba(245,158,11,0.4)', text: '#F59E0B', head: '#F59E0B', line: 'rgba(245,158,11,0.3)' },
   blue: { bg: 'rgba(59,130,246,0.15)', border: 'rgba(59,130,246,0.4)', text: '#60A5FA', head: '#60A5FA', line: 'rgba(59,130,246,0.3)' },
@@ -435,11 +527,17 @@ export default function App() {
   const [isFormAnalyzing, setIsFormAnalyzing] = useState(false);
   const [formSchema, setFormSchema] = useState<FormSchema | null>(null);
   const [formInput, setFormInput] = useState('');
+  const [formMode, setFormMode] = useState<'voice' | 'text'>('text');
+  const [isFormRecording, setIsFormRecording] = useState(false);
+  const [formTranscript, setFormTranscript] = useState('');
+  const [formInterimTranscript, setFormInterimTranscript] = useState('');
   const [isFormFilling, setIsFormFilling] = useState(false);
   const [formFillResult, setFormFillResult] = useState<FormFillResult | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [currentFormQuestionKey, setCurrentFormQuestionKey] = useState<string | null>(null);
 
   const recognitionRef = useRef<any>(null);
+  const formRecognitionRef = useRef<any>(null);
   const transcriptBoxRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -516,12 +614,78 @@ export default function App() {
     setResult(null);
   };
 
+  const stopFormRecording = () => {
+    if (formRecognitionRef.current) {
+      formRecognitionRef.current.stop();
+      formRecognitionRef.current = null;
+    }
+    setIsFormRecording(false);
+    setFormInterimTranscript('');
+  };
+
+  const startFormRecording = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setFormError('Voice recognition is not supported in this browser. Please use text input for the form.');
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    recognition.onresult = (event: any) => {
+      let fin = '';
+      let inter = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          fin += event.results[i][0].transcript + ' ';
+        } else {
+          inter += event.results[i][0].transcript;
+        }
+      }
+
+      if (fin) {
+        setFormTranscript((prev) => prev + fin);
+        setFormInput((prev) => `${prev}${prev.trim() ? ' ' : ''}${fin.trim()}`.trim());
+      }
+      setFormInterimTranscript(inter);
+    };
+
+    recognition.onerror = (event: any) => {
+      setFormError('Form microphone error: ' + event.error + '. Try text input.');
+      stopFormRecording();
+    };
+
+    recognition.onend = () => {
+      setIsFormRecording(false);
+    };
+
+    recognition.start();
+    formRecognitionRef.current = recognition;
+    setIsFormRecording(true);
+    setFormError(null);
+  };
+
+  const toggleFormRecording = () => {
+    if (isFormRecording) {
+      stopFormRecording();
+      return;
+    }
+    startFormRecording();
+  };
+
   const resetFormModule = () => {
+    stopFormRecording();
     setUploadedForm(null);
     setFormSchema(null);
     setFormInput('');
+    setFormTranscript('');
+    setFormInterimTranscript('');
     setFormFillResult(null);
     setFormError(null);
+    setCurrentFormQuestionKey(null);
   };
 
   const fileToBase64 = (file: File): Promise<string> => {
@@ -535,6 +699,48 @@ export default function App() {
       reader.onerror = () => reject(new Error('Failed to read file'));
       reader.readAsDataURL(file);
     });
+  };
+
+  const fileToText = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read file as text'));
+      reader.readAsText(file);
+    });
+  };
+
+  const fileToArrayBuffer = (file: File): Promise<ArrayBuffer> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(new Error('Failed to read file as binary'));
+      reader.readAsArrayBuffer(file);
+    });
+  };
+
+  const spreadsheetFileToText = async (file: File): Promise<string> => {
+    await loadScript('xlsx-script', 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+    const XLSX = (window as any).XLSX;
+    if (!XLSX) {
+      throw new Error('XLSX library failed to load');
+    }
+
+    const buffer = await fileToArrayBuffer(file);
+    const workbook = XLSX.read(buffer, { type: 'array' });
+    const sheetNames: string[] = workbook.SheetNames || [];
+    if (sheetNames.length === 0) {
+      return '';
+    }
+
+    return sheetNames
+      .map((sheetName) => {
+        const sheet = workbook.Sheets[sheetName];
+        const csv = XLSX.utils.sheet_to_csv(sheet, { blankrows: false });
+        return `Sheet: ${sheetName}\n${csv}`.trim();
+      })
+      .filter(Boolean)
+      .join('\n\n');
   };
 
   const getFileExtension = (fileName: string): string => {
@@ -598,7 +804,18 @@ export default function App() {
       setFormError(null);
       setFormFillResult(null);
       setIsFormAnalyzing(true);
-      const fileDataBase64 = await fileToBase64(uploadedForm);
+      const isSpreadsheet = fileExtension === '.xlsx' || fileExtension === '.xls';
+      const isTextLike = fileExtension === '.csv' || fileExtension === '.txt';
+      let fileDataBase64: string | undefined;
+      let fileTextContent: string | undefined;
+
+      if (isSpreadsheet) {
+        fileTextContent = await spreadsheetFileToText(uploadedForm);
+      } else if (isTextLike) {
+        fileTextContent = await fileToText(uploadedForm);
+      } else {
+        fileDataBase64 = await fileToBase64(uploadedForm);
+      }
 
       const resp = await fetch('/api/form/analyze', {
         method: 'POST',
@@ -607,6 +824,7 @@ export default function App() {
           fileName: uploadedForm.name,
           mimeType: uploadedForm.type || undefined,
           fileDataBase64,
+          fileTextContent,
         }),
       });
 
@@ -616,7 +834,10 @@ export default function App() {
       }
 
       const data = await resp.json();
-      setFormSchema(normalizeFormSchema(data));
+      const normalizedSchema = normalizeFormSchema(data);
+      setFormSchema(normalizedSchema);
+      setFormFillResult(buildEmptyFormFillResult(normalizedSchema));
+      setCurrentFormQuestionKey(normalizedSchema.fields[0]?.key || null);
     } catch (err: any) {
       setFormError('Form analysis failed: ' + err.message);
     } finally {
@@ -639,6 +860,8 @@ export default function App() {
     try {
       setFormError(null);
       setIsFormFilling(true);
+      if (isFormRecording) stopFormRecording();
+      const focusField = formSchema.fields.find((field) => field.key === currentFormQuestionKey) || null;
 
       const resp = await fetch('/api/form/fill', {
         method: 'POST',
@@ -646,6 +869,9 @@ export default function App() {
         body: JSON.stringify({
           formSchema,
           userInput,
+          focusFieldKey: focusField?.key,
+          focusFieldLabel: focusField?.label,
+          existingFilledFields: formFillResult?.filledFields || {},
         }),
       });
 
@@ -655,12 +881,76 @@ export default function App() {
       }
 
       const data = await resp.json();
-      setFormFillResult(normalizeFormFillResult(data, formSchema));
+      const normalized = normalizeFormFillResult(data, formSchema);
+      const merged = mergeFormFillResults(formFillResult, normalized, formSchema);
+      setFormFillResult(merged);
+      setFormInput('');
+      setFormTranscript('');
+      setFormInterimTranscript('');
+
+      const nextMissingField = formSchema.fields.find((field) => isBlankValue(merged.filledFields[field.key] || '')) || null;
+      setCurrentFormQuestionKey(nextMissingField?.key || null);
     } catch (err: any) {
       setFormError('Form fill failed: ' + err.message);
     } finally {
       setIsFormFilling(false);
     }
+  };
+
+  const updateFilledField = (fieldKey: string, value: string) => {
+    setFormFillResult((prev) => {
+      if (!prev) return prev;
+      const next: FormFillResult = {
+        ...prev,
+        filledFields: {
+          ...prev.filledFields,
+          [fieldKey]: value,
+        },
+      };
+      if (formSchema) {
+        const nextMissingField = formSchema.fields.find((field) => isBlankValue(next.filledFields[field.key] || '')) || null;
+        setCurrentFormQuestionKey(nextMissingField?.key || null);
+      }
+      return next;
+    });
+  };
+
+  const updateFilledTableCell = (tableKey: string, rowIndex: number, cellIndex: number, value: string) => {
+    setFormFillResult((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        filledTables: prev.filledTables.map((table) => {
+          if (table.key !== tableKey) return table;
+          const rows = table.rows.map((row) => [...row]);
+          while (rows.length <= rowIndex) {
+            rows.push(Array.from({ length: table.columns.length }, () => ''));
+          }
+          while (rows[rowIndex].length < table.columns.length) {
+            rows[rowIndex].push('');
+          }
+          rows[rowIndex][cellIndex] = value;
+          return {
+            ...table,
+            rows,
+          };
+        }),
+      };
+    });
+  };
+
+  const addFormTableRow = (tableKey: string) => {
+    setFormFillResult((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        filledTables: prev.filledTables.map((table) => (
+          table.key === tableKey
+            ? { ...table, rows: [...table.rows, Array.from({ length: table.columns.length }, () => '')] }
+            : table
+        )),
+      };
+    });
   };
 
   const processData = async () => {
@@ -1063,6 +1353,14 @@ export default function App() {
   };
 
   const resColor = result ? COLORS[result.color] || COLORS.amber : COLORS.amber;
+  const fieldMap = formSchema ? new Map(formSchema.fields.map((field) => [field.key, field])) : new Map<string, FormField>();
+  const tableMap = formSchema ? new Map(formSchema.tableSections.map((table) => [table.key, table])) : new Map<string, FormTableSection>();
+  const missingFieldKeys = formSchema && formFillResult
+    ? formSchema.fields
+        .filter((field) => isBlankValue(formFillResult.filledFields[field.key] || ''))
+        .map((field) => field.key)
+    : [];
+  const currentQuestionField = currentFormQuestionKey ? fieldMap.get(currentFormQuestionKey) || null : null;
 
   return (
     <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] font-sans selection:bg-amber-500/30">
@@ -1359,10 +1657,15 @@ export default function App() {
               className="w-full bg-[#21262D] border border-[#30363D] rounded-lg p-2.5 text-xs text-[#E6EDF3] file:mr-3 file:rounded-md file:border-0 file:bg-[#0D1117] file:text-[#E6EDF3] file:px-3 file:py-1.5"
               onChange={(e) => {
                 const file = e.target.files?.[0] || null;
+                stopFormRecording();
                 setUploadedForm(file);
                 setFormSchema(null);
+                setFormInput('');
+                setFormTranscript('');
+                setFormInterimTranscript('');
                 setFormFillResult(null);
                 setFormError(null);
+                setCurrentFormQuestionKey(null);
               }}
             />
             {uploadedForm && (
@@ -1403,15 +1706,70 @@ export default function App() {
               </div>
 
               <div className="bg-[#21262D] border border-[#30363D] rounded-lg p-3">
-                <label className="block text-xs text-[#8B949E] mb-2">
-                  Give natural input (voice transcript or typed text)
-                </label>
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <label className="block text-xs text-[#8B949E]">
+                    Answer the missing fields in easy text or voice. The form stays editable below.
+                  </label>
+                  <div className="inline-flex bg-[#0D1117] border border-[#30363D] rounded-lg p-1">
+                    <button
+                      className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${formMode === 'text' ? 'bg-[#22D3EE] text-black' : 'text-[#8B949E]'}`}
+                      onClick={() => setFormMode('text')}
+                    >
+                      Text
+                    </button>
+                    <button
+                      className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${formMode === 'voice' ? 'bg-amber-500 text-black' : 'text-[#8B949E]'}`}
+                      onClick={() => setFormMode('voice')}
+                    >
+                      Voice
+                    </button>
+                  </div>
+                </div>
+
+                {currentQuestionField ? (
+                  <div className="mb-3 bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+                    <div className="text-xs text-amber-400 font-semibold">Next missing value</div>
+                    <div className="text-sm text-white mt-1">
+                      Please tell me <span className="text-amber-300">{currentQuestionField.label}</span>.
+                    </div>
+                    {currentQuestionField.description && (
+                      <div className="text-[11px] text-[#8B949E] mt-1">{currentQuestionField.description}</div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mb-3 bg-[#4ADE80]/10 border border-[#4ADE80]/30 rounded-lg p-3 text-sm text-[#E6EDF3]">
+                    All detected fields have values. You can still edit anything below before downloading.
+                  </div>
+                )}
+
+                {formMode === 'voice' && (
+                  <div className="mb-3 bg-[#161B22] border border-[#30363D] rounded-lg p-3">
+                    <div className="flex gap-2.5">
+                      <button
+                        className={`flex-1 py-2.5 rounded-lg font-bold transition-all flex items-center justify-center gap-2 text-sm ${isFormRecording ? 'bg-red-500 hover:bg-red-400 text-white' : 'bg-amber-500 hover:bg-amber-400 text-black'}`}
+                        onClick={toggleFormRecording}
+                      >
+                        {isFormRecording ? <Loader2 size={16} className="animate-spin" /> : <Mic size={16} fill="currentColor" />}
+                        {isFormRecording ? 'STOP FORM VOICE' : 'START FORM VOICE'}
+                      </button>
+                    </div>
+                    <div className="mt-2 text-[11px] text-[#8B949E]">
+                      {formTranscript || formInterimTranscript
+                        ? `${formTranscript}${formInterimTranscript ? ` ${formInterimTranscript}` : ''}`.trim()
+                        : 'Speak naturally. Your transcript will be added to the fill input.'}
+                    </div>
+                  </div>
+                )}
+
                 <textarea
                   className="w-full bg-[#161B22] border border-[#30363D] rounded-lg p-3 text-[#E6EDF3] font-mono text-xs leading-relaxed outline-none focus:border-[#22D3EE] transition-colors min-h-[96px] resize-y"
-                  placeholder="Example: My name is Phushoth, I am 21 years old, studying CSE..."
+                  placeholder={currentQuestionField ? `Answer for ${currentQuestionField.label}...` : 'Add more values, corrections, or extra rows here...'}
                   value={formInput}
                   onChange={(e) => setFormInput(e.target.value)}
                 />
+                <div className="mt-2 text-[11px] text-[#8B949E]">
+                  Missing fields remaining: <span className="text-[#E6EDF3]">{missingFieldKeys.length}</span>
+                </div>
                 <div className="mt-3 flex gap-2.5">
                   <button
                     className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 text-black font-bold rounded-lg transition-all flex items-center justify-center gap-2 text-sm disabled:opacity-50"
@@ -1419,7 +1777,7 @@ export default function App() {
                     disabled={isFormFilling || !formInput.trim()}
                   >
                     {isFormFilling ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
-                    {isFormFilling ? 'MAPPING VALUES...' : 'AUTO-FILL FORM'}
+                    {isFormFilling ? 'MAPPING VALUES...' : currentQuestionField ? 'FILL THIS FIELD' : 'APPLY FORM VALUES'}
                   </button>
                 </div>
               </div>
@@ -1432,60 +1790,80 @@ export default function App() {
                 <strong className="text-[#22D3EE]">Fill Summary:</strong> {formFillResult.summary}
               </div>
 
-              {formSchema.fields.length > 0 && (
-                <div className="bg-[#0D1117] border border-[#30363D] rounded-lg overflow-hidden">
-                  <table className="w-full border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-[#161B22] border-b border-[#30363D]">
-                        <th className="px-3 py-2 text-left text-[#22D3EE] uppercase tracking-wide">Field</th>
-                        <th className="px-3 py-2 text-left text-[#22D3EE] uppercase tracking-wide">Mapped Value</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {formSchema.fields.map((field) => (
-                        <tr key={field.key} className="border-b border-[#30363D]">
-                          <td className="px-3 py-2 text-[#8B949E]">{field.label}</td>
-                          <td className="px-3 py-2 text-[#E6EDF3]">{formFillResult.filledFields[field.key] || ''}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+              <div className="bg-[#0D1117] border border-[#30363D] rounded-lg overflow-hidden">
+                <div className="px-3 py-2 border-b border-[#30363D] text-sm text-white font-semibold">
+                  Filled Form Preview
                 </div>
-              )}
+                <div className="p-3 space-y-4">
+                  {formSchema.layoutBlocks.map((block, blockIndex) => {
+                    if (block.kind === 'field' && block.fieldKey) {
+                      const field = fieldMap.get(block.fieldKey);
+                      if (!field) return null;
+                      const value = formFillResult.filledFields[field.key] || '';
+                      return (
+                        <div key={`${block.kind}-${block.fieldKey}-${blockIndex}`} className="grid grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)] gap-2 items-center">
+                          <label className="text-xs text-[#8B949E]">{field.label}</label>
+                          <input
+                            className={`w-full bg-[#161B22] border rounded-lg px-3 py-2 text-xs text-[#E6EDF3] outline-none transition-colors ${isBlankValue(value) ? 'border-amber-500/50' : 'border-[#30363D] focus:border-[#22D3EE]'}`}
+                            value={value}
+                            placeholder={field.required ? 'Required' : 'Optional'}
+                            onChange={(e) => updateFilledField(field.key, e.target.value)}
+                          />
+                        </div>
+                      );
+                    }
 
-              {formFillResult.filledTables.map((table) => (
-                <div key={table.key} className="bg-[#0D1117] border border-[#30363D] rounded-lg overflow-hidden">
-                  <div className="px-3 py-2 border-b border-[#30363D] text-sm text-white font-semibold">
-                    {table.title || humanizeKey(table.key)}
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-[#161B22] border-b border-[#30363D]">
-                          {table.columns.map((column, index) => (
-                            <th key={index} className="px-3 py-2 text-left text-[#22D3EE] uppercase tracking-wide">{column}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {table.rows.length === 0 ? (
-                          <tr>
-                            <td className="px-3 py-2 text-[#8B949E]" colSpan={table.columns.length}>No rows mapped</td>
-                          </tr>
-                        ) : (
-                          table.rows.map((row, rowIndex) => (
-                            <tr key={rowIndex} className="border-b border-[#30363D]">
-                              {row.map((cell, cellIndex) => (
-                                <td key={cellIndex} className="px-3 py-2 text-[#E6EDF3]">{cell}</td>
-                              ))}
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                    if (block.kind === 'table' && block.tableKey) {
+                      const schemaTable = tableMap.get(block.tableKey);
+                      const filledTable = formFillResult.filledTables.find((table) => table.key === block.tableKey);
+                      if (!schemaTable || !filledTable) return null;
+                      return (
+                        <div key={`${block.kind}-${block.tableKey}-${blockIndex}`} className="border border-[#30363D] rounded-lg overflow-hidden">
+                          <div className="px-3 py-2 border-b border-[#30363D] text-sm text-white font-semibold">
+                            {schemaTable.title}
+                          </div>
+                          <div className="overflow-x-auto">
+                            <table className="w-full border-collapse text-xs">
+                              <thead>
+                                <tr className="bg-[#161B22] border-b border-[#30363D]">
+                                  {schemaTable.columns.map((column, index) => (
+                                    <th key={index} className="px-3 py-2 text-left text-[#22D3EE] uppercase tracking-wide">{column}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(filledTable.rows.length > 0 ? filledTable.rows : [Array.from({ length: schemaTable.columns.length }, () => '')]).map((row, rowIndex) => (
+                                  <tr key={rowIndex} className="border-b border-[#30363D]">
+                                    {schemaTable.columns.map((_, cellIndex) => (
+                                      <td key={cellIndex} className="px-2 py-2">
+                                        <input
+                                          className="w-full bg-[#161B22] border border-[#30363D] rounded-md px-2 py-1.5 text-xs text-[#E6EDF3] outline-none focus:border-[#22D3EE]"
+                                          value={row[cellIndex] || ''}
+                                          onChange={(e) => updateFilledTableCell(schemaTable.key, rowIndex, cellIndex, e.target.value)}
+                                        />
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          <div className="p-2 bg-[#161B22] border-t border-[#30363D]">
+                            <button
+                              className="px-3 py-1.5 bg-transparent border border-[#22D3EE] text-[#22D3EE] hover:bg-[#22D3EE] hover:text-black rounded-md text-xs transition-all"
+                              onClick={() => addFormTableRow(schemaTable.key)}
+                            >
+                              Add Row
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    return null;
+                  })}
                 </div>
-              ))}
+              </div>
 
               {formFillResult.unmappedInfo.length > 0 && (
                 <div className="bg-amber-500/5 border border-amber-500/30 rounded-lg p-3">
