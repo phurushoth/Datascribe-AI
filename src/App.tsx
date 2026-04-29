@@ -1098,37 +1098,52 @@ export default function App() {
 
       let currentRow = 0;
 
-      // Title Section
+      // ===== 1. TITLE SECTION =====
       aoa.push([result.title?.toUpperCase() || 'REPORT']);
-      merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:E${currentRow + 1}`));
+      merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:F${currentRow + 1}`));
       currentRow++;
 
       // Empty row
       aoa.push([]);
       currentRow++;
 
-      // General Information Section Header
+      // ===== 2. REPORT DETAILS SECTION =====
+      aoa.push(['REPORT DETAILS']);
+      merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:F${currentRow + 1}`));
+      currentRow++;
+
+      // Report Details: Form Type | Value | Exported On | Value
+      const reportDetailsRow = [
+        'Form Type',
+        result.documentType || 'Report',
+        'Exported On',
+        exportedAt,
+      ];
+      aoa.push(reportDetailsRow);
+      currentRow++;
+
+      // Empty row
+      aoa.push([]);
+      currentRow++;
+
+      // ===== 3. GENERAL INFORMATION SECTION =====
       if (metadataEntries.length > 0) {
         aoa.push(['GENERAL INFORMATION']);
-        merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:E${currentRow + 1}`));
+        merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:F${currentRow + 1}`));
         currentRow++;
 
-        // Add metadata in pairs (2 columns layout: Label | Value | Label | Value)
-        const metadataArray = metadataEntries;
-        for (let i = 0; i < metadataArray.length; i += 2) {
+        // Add metadata in 2-column pairs: Label | Value | Label | Value
+        for (let i = 0; i < metadataEntries.length; i += 2) {
           const row: any[] = [];
           
           // First pair
-          row.push(humanizeKey(metadataArray[i][0]));
-          row.push(String(metadataArray[i][1]));
+          row.push(humanizeKey(metadataEntries[i][0]));
+          row.push(String(metadataEntries[i][1]));
           
           // Second pair (if exists)
-          if (i + 1 < metadataArray.length) {
-            row.push(humanizeKey(metadataArray[i + 1][0]));
-            row.push(String(metadataArray[i + 1][1]));
-          } else {
-            row.push('');
-            row.push('');
+          if (i + 1 < metadataEntries.length) {
+            row.push(humanizeKey(metadataEntries[i + 1][0]));
+            row.push(String(metadataEntries[i + 1][1]));
           }
           
           aoa.push(row);
@@ -1140,11 +1155,34 @@ export default function App() {
       aoa.push([]);
       currentRow++;
 
-      // Data Table Section Header
+      // ===== 4. SUMMARY SECTION =====
+      if (result.summary) {
+        aoa.push(['INSPECTION SUMMARY']);
+        merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:F${currentRow + 1}`));
+        currentRow++;
+
+        // Add summary text with key fields if available
+        const summaryLines = result.summary.split('\n').filter(line => line.trim());
+        for (const line of summaryLines) {
+          aoa.push([line]);
+          merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:F${currentRow + 1}`));
+          currentRow++;
+        }
+      }
+
+      // Empty row
+      aoa.push([]);
+      currentRow++;
+
+      // ===== 5. DATA TABLE SECTION =====
       if (result.columns && result.columns.length > 0) {
-        const tableHeaderText = `${result.documentType || 'DATA'} DETAILS`;
-        aoa.push([tableHeaderText]);
+        const tableHeaderText = result.documentType || 'DATA';
+        aoa.push([`${tableHeaderText} INSPECTION`]);
         merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:${XLSX.utils.encode_col(result.columns.length - 1)}${currentRow + 1}`));
+        currentRow++;
+
+        // Empty row before table
+        aoa.push([]);
         currentRow++;
 
         // Table Headers
@@ -1165,55 +1203,38 @@ export default function App() {
         }
       }
 
-      // Empty row
-      aoa.push([]);
-      currentRow++;
-
-      // Summary Section
-      if (result.summary) {
-        aoa.push(['SUMMARY']);
-        merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:E${currentRow + 1}`));
-        currentRow++;
-
-        aoa.push([result.summary]);
-        merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:E${currentRow + 1}`));
-        currentRow++;
-      }
-
-      // Empty row
-      aoa.push([]);
-      currentRow++;
-
-      // Export metadata at bottom
-      aoa.push(['Exported On', exportedAt]);
-      aoa.push(['Document Type', result.documentType || 'Document']);
-
+      // Create worksheet
       const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-      // Set column widths for better readability
+      // ===== SET COLUMN WIDTHS =====
       const colWidths: any[] = [];
-      for (let i = 0; i < 5; i++) {
-        let maxWidth = 15;
+      const maxCols = Math.max(
+        ...(result.columns ? [result.columns.length] : [6]),
+        6
+      );
+      
+      for (let i = 0; i < maxCols; i++) {
+        let maxWidth = 12;
         for (const row of aoa) {
           if (row[i]) {
-            const length = String(row[i]).length;
-            maxWidth = Math.max(maxWidth, Math.min(50, length + 2));
+            const cellLength = String(row[i]).length;
+            maxWidth = Math.max(maxWidth, Math.min(40, cellLength + 2));
           }
         }
         colWidths.push({ wch: maxWidth });
       }
       ws['!cols'] = colWidths;
 
-      // Set specific row heights for better appearance
+      // ===== SET ROW HEIGHTS =====
       ws['!rows'] = [];
-      ws['!rows'][0] = { hpt: 22 }; // Title row - larger
+      ws['!rows'][0] = { hpt: 24 }; // Title row
 
-      // Apply merged cells
+      // ===== APPLY MERGED CELLS =====
       if (merges.length > 0) {
         ws['!merges'] = merges;
       }
 
-      // Create and configure workbook
+      // ===== CREATE WORKBOOK =====
       const wb = XLSX.utils.book_new();
       wb.Props = {
         Title: result.title || 'DataScribe Export',
