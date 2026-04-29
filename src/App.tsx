@@ -1093,58 +1093,127 @@ export default function App() {
       const now = new Date();
       const exportedAt = now.toLocaleString();
       const metadataEntries = Object.entries(result.metadata || {});
-      const tableRows: string[][] = [result.columns, ...result.rows, ...(result.totalRow ? [result.totalRow] : [])];
       const aoa: any[][] = [];
+      const merges: any[] = [];
 
-      aoa.push([`DATASCRIBE AI REPORT`]);
-      aoa.push([result.title || 'Structured Data Output']);
-      aoa.push(['Document Type', result.documentType || 'Document']);
-      aoa.push(['Exported On', exportedAt]);
+      let currentRow = 0;
+
+      // Title Section
+      aoa.push([result.title?.toUpperCase() || 'REPORT']);
+      merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:E${currentRow + 1}`));
+      currentRow++;
+
+      // Empty row
       aoa.push([]);
+      currentRow++;
 
+      // General Information Section Header
       if (metadataEntries.length > 0) {
-        aoa.push(['Metadata']);
-        for (const [key, value] of metadataEntries) {
-          aoa.push([humanizeKey(key), String(value)]);
+        aoa.push(['GENERAL INFORMATION']);
+        merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:E${currentRow + 1}`));
+        currentRow++;
+
+        // Add metadata in pairs (2 columns layout: Label | Value | Label | Value)
+        const metadataArray = metadataEntries;
+        for (let i = 0; i < metadataArray.length; i += 2) {
+          const row: any[] = [];
+          
+          // First pair
+          row.push(humanizeKey(metadataArray[i][0]));
+          row.push(String(metadataArray[i][1]));
+          
+          // Second pair (if exists)
+          if (i + 1 < metadataArray.length) {
+            row.push(humanizeKey(metadataArray[i + 1][0]));
+            row.push(String(metadataArray[i + 1][1]));
+          } else {
+            row.push('');
+            row.push('');
+          }
+          
+          aoa.push(row);
+          currentRow++;
         }
-        aoa.push([]);
       }
 
-      const tableHeaderRowIndex = aoa.length;
-      aoa.push(result.columns);
-      for (const row of result.rows) {
-        aoa.push(row);
+      // Empty row
+      aoa.push([]);
+      currentRow++;
+
+      // Data Table Section Header
+      if (result.columns && result.columns.length > 0) {
+        const tableHeaderText = `${result.documentType || 'DATA'} DETAILS`;
+        aoa.push([tableHeaderText]);
+        merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:${XLSX.utils.encode_col(result.columns.length - 1)}${currentRow + 1}`));
+        currentRow++;
+
+        // Table Headers
+        const headers = result.columns.map(col => String(col));
+        aoa.push(headers);
+        currentRow++;
+
+        // Data Rows
+        for (const row of result.rows) {
+          aoa.push(row);
+          currentRow++;
+        }
+
+        // Total Row (if exists)
+        if (result.totalRow) {
+          aoa.push(result.totalRow);
+          currentRow++;
+        }
       }
-      if (result.totalRow) {
-        aoa.push(result.totalRow);
+
+      // Empty row
+      aoa.push([]);
+      currentRow++;
+
+      // Summary Section
+      if (result.summary) {
+        aoa.push(['SUMMARY']);
+        merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:E${currentRow + 1}`));
+        currentRow++;
+
+        aoa.push([result.summary]);
+        merges.push(XLSX.utils.decode_range(`A${currentRow + 1}:E${currentRow + 1}`));
+        currentRow++;
       }
+
+      // Empty row
+      aoa.push([]);
+      currentRow++;
+
+      // Export metadata at bottom
+      aoa.push(['Exported On', exportedAt]);
+      aoa.push(['Document Type', result.documentType || 'Document']);
 
       const ws = XLSX.utils.aoa_to_sheet(aoa);
-      const colCount = Math.max(result.columns.length, 2);
-      const lastColLabel = XLSX.utils.encode_col(colCount - 1);
-      ws['!merges'] = [
-        XLSX.utils.decode_range(`A1:${lastColLabel}1`),
-        XLSX.utils.decode_range(`A2:${lastColLabel}2`),
-      ];
 
-      ws['!autofilter'] = {
-        ref: `A${tableHeaderRowIndex + 1}:${XLSX.utils.encode_col(result.columns.length - 1)}${tableHeaderRowIndex + tableRows.length}`,
-      };
-
-      ws['!cols'] = result.columns.map((header, colIndex) => {
-        let maxLength = String(header || '').length;
-        for (const row of result.rows) {
-          maxLength = Math.max(maxLength, String(row[colIndex] || '').length);
+      // Set column widths for better readability
+      const colWidths: any[] = [];
+      for (let i = 0; i < 5; i++) {
+        let maxWidth = 15;
+        for (const row of aoa) {
+          if (row[i]) {
+            const length = String(row[i]).length;
+            maxWidth = Math.max(maxWidth, Math.min(50, length + 2));
+          }
         }
-        if (result.totalRow) {
-          maxLength = Math.max(maxLength, String(result.totalRow[colIndex] || '').length);
-        }
-        return { wch: Math.min(50, Math.max(16, maxLength + 2)) };
-      });
+        colWidths.push({ wch: maxWidth });
+      }
+      ws['!cols'] = colWidths;
 
-      if (ws['A4']) ws['A4'].z = '@';
-      if (ws['B4']) ws['B4'].z = '@';
+      // Set specific row heights for better appearance
+      ws['!rows'] = [];
+      ws['!rows'][0] = { hpt: 22 }; // Title row - larger
 
+      // Apply merged cells
+      if (merges.length > 0) {
+        ws['!merges'] = merges;
+      }
+
+      // Create and configure workbook
       const wb = XLSX.utils.book_new();
       wb.Props = {
         Title: result.title || 'DataScribe Export',
@@ -1152,7 +1221,8 @@ export default function App() {
         Author: 'DataScribe AI',
         CreatedDate: now,
       };
-      XLSX.utils.book_append_sheet(wb, ws, 'Extracted Data');
+
+      XLSX.utils.book_append_sheet(wb, ws, 'Report');
       XLSX.writeFile(wb, `${result.title.replace(/\s+/g, '_')}.xlsx`);
     } catch (e: any) {
       setError('Excel export failed: ' + e.message);
