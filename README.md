@@ -8,8 +8,6 @@ DataScribe AI is a voice-first and text-first AI automation platform with two ma
 - Structured Data Extraction (narrative input -> table + summary + exports)
 - Form Fill Module (upload form -> AI-assisted semantic autofill -> downloadable filled form)
 
-AI Studio App Link: https://ai.studio/apps/29e08c79-df5c-4c23-b74b-b6ac2f7d54d2
-
 ## Core modules
 
 ### 1) Structured Data Extraction Module
