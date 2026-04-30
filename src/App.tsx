@@ -1348,60 +1348,104 @@ export default function App() {
     await saveFilledFormPDF();
   };
 
-  const exportFilledFormWorkbook = async (ext: '.xlsx' | '.xls' | '.csv' | '.txt', baseName?: string) => {
-    if (!formSchema || !formFillResult) return;
+const exportFilledFormWorkbook = async (ext: '.xlsx' | '.xls' | '.csv' | '.txt', baseName?: string) => {
+  if (!formSchema || !formFillResult) return;
 
-    await loadScript('xlsx-script', 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
-    const XLSX = (window as any).XLSX;
-    if (!XLSX) {
-      throw new Error('XLSX library failed to load');
+  await loadScript('xlsx-script', 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+  const XLSX = (window as any).XLSX;
+  if (!XLSX) {
+    throw new Error('XLSX library failed to load');
+  }
+
+  const now = new Date();
+  const aoa: any[][] = [];
+  const merges: any[] = [];
+
+  let row = 0;
+
+  // ===== TITLE =====
+  aoa.push(['ELECTRICAL INSPECTION REPORT']);
+  merges.push(XLSX.utils.decode_range(`A${row + 1}:I${row + 1}`));
+  row++;
+
+  aoa.push([]);
+  row++;
+
+  // ===== REPORT DETAILS =====
+  aoa.push(['Report Details']);
+  merges.push(XLSX.utils.decode_range(`A${row + 1}:I${row + 1}`));
+  row++;
+
+  aoa.push(['Form Type', formSchema.formType || 'Form', '', 'Exported On', now.toLocaleString()]);
+  row++;
+
+  aoa.push([]);
+  row++;
+
+  // ===== GENERAL INFORMATION =====
+  aoa.push(['General Information']);
+  merges.push(XLSX.utils.decode_range(`A${row + 1}:I${row + 1}`));
+  row++;
+
+  for (const field of formSchema.fields) {
+    aoa.push([field.label, formFillResult.filledFields[field.key] || '']);
+    row++;
+  }
+
+  aoa.push([]);
+  row++;
+
+  // ===== TABLE SECTIONS =====
+  for (const table of formFillResult.filledTables) {
+    aoa.push([table.title || 'Table']);
+    merges.push(
+      XLSX.utils.decode_range(`A${row + 1}:${XLSX.utils.encode_col(table.columns.length - 1)}${row + 1}`)
+    );
+    row++;
+
+    // headers
+    aoa.push(table.columns);
+    row++;
+
+    // rows
+    for (const r of table.rows) {
+      aoa.push(r);
+      row++;
     }
 
-    const now = new Date();
-    const aoa: any[][] = [];
-    aoa.push(['DATASCRIBE AI - FILLED FORM']);
-    aoa.push([formSchema.formTitle || 'Filled Form']);
-    aoa.push(['Form Type', formSchema.formType || 'form']);
-    aoa.push(['Exported On', now.toLocaleString()]);
     aoa.push([]);
-    aoa.push(['Field', 'Value']);
-    for (const field of formSchema.fields) {
-      aoa.push([field.label, formFillResult.filledFields[field.key] || '']);
-    }
+    row++;
+  }
 
-    for (const table of formFillResult.filledTables) {
-      aoa.push([]);
-      aoa.push([table.title || humanizeKey(table.key)]);
-      aoa.push(table.columns);
-      for (const row of table.rows) {
-        aoa.push(row);
+  // ===== CREATE SHEET =====
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  // ===== MERGES =====
+  ws['!merges'] = merges;
+
+  // ===== COLUMN WIDTH =====
+  const colCount = 9;
+  const colWidths = [];
+
+  for (let i = 0; i < colCount; i++) {
+    let max = 15;
+    for (const r of aoa) {
+      if (r[i]) {
+        max = Math.max(max, String(r[i]).length + 2);
       }
     }
+    colWidths.push({ wch: Math.min(max, 40) });
+  }
 
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = [{ wch: 32 }, { wch: 54 }];
+  ws['!cols'] = colWidths;
 
-    const wb = XLSX.utils.book_new();
-    wb.Props = {
-      Title: `${formSchema.formTitle || 'Filled Form'} - Filled Output`,
-      Subject: formSchema.formType || 'form',
-      Author: 'DataScribe AI',
-      CreatedDate: now,
-    };
-    XLSX.utils.book_append_sheet(wb, ws, 'Filled Form');
+  // ===== WORKBOOK =====
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Inspection Report');
 
-    const stem = (baseName || formSchema.formTitle || 'filled_form').replace(/\s+/g, '_');
-    const outName = `${stem}_filled${ext}`;
-    const options = ext === '.xls'
-      ? { bookType: 'biff8' }
-      : ext === '.csv'
-        ? { bookType: 'csv' }
-        : ext === '.txt'
-          ? { bookType: 'txt' }
-          : { bookType: 'xlsx' };
-
-    XLSX.writeFile(wb, outName, options);
-  };
+  const stem = (baseName || formSchema.formTitle || 'filled_form').replace(/\s+/g, '_');
+  XLSX.writeFile(wb, `${stem}_clean.xlsx`);
+};
 
   const downloadFilledFormExcel = async () => {
     if (!formSchema || !formFillResult) return;

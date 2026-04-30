@@ -1,4 +1,5 @@
 # DataScribe AI Project Architecture Guide
+Intelligent Extraction & Mapping System (IEMS)
 
 This file is a study guide for the project. It explains what each file does, how the frontend and backend are connected, how data moves through the app, and what the important functions in the code are doing.
 
