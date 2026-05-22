@@ -236,3 +236,5 @@ Error responses:
 - App Name: `DataScribe AI`
 - Description: `Voice to Structured Data Intelligence + AI-powered Form Fill automation`
 - Required browser permission: `microphone`
+
+<img width="100%" src="https://raw.githubusercontent.com/phurushoth/Datascribe-AI/main/project%20screenshot.png">
