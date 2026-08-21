@@ -1,0 +1,13 @@
+import { useEffect, useState } from 'react';
+import { Search, FileText, ClipboardCheck } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import type { DocumentRecord } from '../types/app';
+
+export default function DocumentsPage() {
+  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { fetch('/api/documents', { credentials: 'include' }).then(r => r.json()).then(d => setDocuments(d.documents || [])).finally(() => setLoading(false)); }, []);
+  const filtered = documents.filter(d => `${d.title} ${d.documentType}`.toLowerCase().includes(query.toLowerCase()));
+  return <div className="mx-auto max-w-7xl space-y-6 p-5 sm:p-8"><div><p className="text-sm font-semibold text-indigo-600">Library</p><h1 className="mt-1 text-3xl font-extrabold tracking-tight">Documents</h1><p className="mt-2 text-slate-500">Every completed extraction and form workflow belongs to your account.</p></div><div className="relative"><Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search documents..." className="h-12 w-full rounded-2xl border border-slate-200 bg-white pl-11 pr-4 outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-50"/></div><div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="hidden grid-cols-[1fr_180px_140px_120px] border-b border-slate-100 bg-slate-50 px-5 py-3 text-xs font-bold uppercase tracking-wider text-slate-400 sm:grid"><span>Document</span><span>Type</span><span>Status</span><span>Date</span></div>{loading ? <div className="p-10 text-center text-sm text-slate-400">Loading documents...</div> : filtered.length ? filtered.map(d => <Link key={d.id} to={`/documents/${d.id}`} className="grid gap-2 border-b border-slate-100 px-5 py-4 last:border-0 hover:bg-slate-50 sm:grid-cols-[1fr_180px_140px_120px] sm:items-center"><div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600">{d.workflow === 'form-fill' ? <ClipboardCheck size={18}/> : <FileText size={18}/>}</div><div><p className="font-semibold text-slate-800">{d.title}</p><p className="text-xs text-slate-400">{d.workflow}</p></div></div><span className="text-sm text-slate-500">{d.documentType}</span><span className="text-xs font-semibold capitalize text-emerald-600">{d.status}</span><span className="text-xs text-slate-400">{new Date(d.createdAt).toLocaleDateString()}</span></Link>) : <div className="p-12 text-center text-sm text-slate-400">No matching documents.</div>}</div></div>;
+}

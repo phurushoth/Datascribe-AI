@@ -1,0 +1,6 @@
+{
+  "name": "DataScribe AI",
+  "description": "Voice to Structured Data Intelligence tool that extracts structured information from narrative speech or text.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": []
+}
